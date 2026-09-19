@@ -1,0 +1,13 @@
+﻿<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" rx="128" fill="#181818"/>
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="#242424" stroke="#eab308" stroke-width="8"/>
+  <g transform="translate(256, 230) scale(1.4)">
+    <!-- Dumbbell / Access Symbol -->
+    <rect x="-60" y="-12" width="120" height="24" rx="8" fill="#f5a623" stroke="#eab308" stroke-width="4"/>
+    <rect x="-95" y="-55" width="35" height="110" rx="12" fill="#f5a623" stroke="#eab308" stroke-width="4"/>
+    <rect x="60" y="-55" width="35" height="110" rx="12" fill="#f5a623" stroke="#eab308" stroke-width="4"/>
+    <rect x="-135" y="-40" width="30" height="80" rx="10" fill="#f5a623" stroke="#eab308" stroke-width="4"/>
+    <rect x="105" y="-40" width="30" height="80" rx="10" fill="#f5a623" stroke="#eab308" stroke-width="4"/>
+  </g>
+  <text x="256" y="425" font-family="Inter, system-ui, sans-serif" font-size="44" font-weight="900" fill="#f5a623" text-anchor="middle" letter-spacing="2">GIMNASIOACCESS</text>
+</svg>
