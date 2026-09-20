@@ -172,20 +172,19 @@ DROP POLICY IF EXISTS "logs_teacher_read"  ON access_logs;
 DROP POLICY IF EXISTS "logs_guard_read"    ON access_logs;
 DROP POLICY IF EXISTS "logs_admin_all"     ON access_logs;
 
--- Kiosco puede insertar eventos de acceso
+-- Kiosco, admin y docente pueden insertar eventos de acceso
 CREATE POLICY "logs_kiosk_insert" ON access_logs FOR INSERT TO authenticated
-  WITH CHECK (get_user_role() IN ('kiosco','admin'));
+  WITH CHECK (get_user_role() IN ('kiosco', 'admin', 'docente'));
 
--- Docente ve los logs de las ubicaciones donde imparte clase o su ubicación asignada
+-- Docentes, administradores y kiosco pueden leer logs de acceso
+-- Permite visualizar el monitoreo de presencia en tiempo real
 CREATE POLICY "logs_teacher_read" ON access_logs FOR SELECT TO authenticated
   USING (
-    get_user_role() IN ('docente')
+    get_user_role() IN ('admin', 'docente', 'kiosco')
     AND (
-      lab_id = get_user_lab_id()
-      OR lab_id IN (
-        SELECT s.lab_id FROM schedules s
-        WHERE s.teacher_id = auth.uid()
-      )
+      get_user_lab_id() IS NULL
+      OR lab_id IS NULL
+      OR lab_id = get_user_lab_id()
     )
   );
 
@@ -204,10 +203,16 @@ CREATE POLICY "profiles_admin_all" ON profiles FOR ALL    TO authenticated
 -- 5. PUBLICACIONES REALTIME
 -- ============================================================
 -- Activa Realtime para access_logs (cambios visibles en tiempo real)
--- Configurar en Supabase Dashboard → Database → Replication
--- o ejecutar:
--- ALTER PUBLICATION supabase_realtime ADD TABLE access_logs;
--- ALTER PUBLICATION supabase_realtime ADD TABLE profiles;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables
+    WHERE pubname = 'supabase_realtime' AND tablename = 'access_logs'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE access_logs;
+  END IF;
+END $$;
+ALTER TABLE access_logs REPLICA IDENTITY FULL;
 
 -- 6. FUNCIONES Y VISTAS ÚTILES
 -- ============================================================
@@ -310,6 +315,7 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 -- Ejecutar sólo en entorno de desarrollo
 
 INSERT INTO labs (id, code, name, location) VALUES
+  ('00000000-0000-0000-0000-000000000001', 'RECEPCION', 'Recepción Principal', 'Planta Baja, Entrada'),
   ('11111111-1111-1111-1111-111111111111', 'LAB-A', 'Laboratorio de Cómputo A', 'Edificio 3, Planta Baja'),
   ('22222222-2222-2222-2222-222222222222', 'LAB-B', 'Laboratorio de Redes',     'Edificio 3, Planta Alta'),
   ('33333333-3333-3333-3333-333333333333', 'LAB-C', 'Laboratorio de Electrónica', 'Edificio 5, Planta Baja')

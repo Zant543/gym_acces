@@ -102,6 +102,30 @@ export async function uploadAccessPhoto(dataUrl, matricula = 'DESCONOCIDO') {
   }
 }
 
+let cachedDefaultLocationId = null
+
+/**
+ * Obtiene un ID de ubicación válido existente en la base de datos.
+ */
+export async function getDefaultLocationId() {
+  if (cachedDefaultLocationId) return cachedDefaultLocationId
+  try {
+    const { data: loc } = await supabase.from('locations').select('id').limit(1).maybeSingle()
+    if (loc?.id) {
+      cachedDefaultLocationId = loc.id
+      return loc.id
+    }
+  } catch {}
+  try {
+    const { data: lab } = await supabase.from('labs').select('id').limit(1).maybeSingle()
+    if (lab?.id) {
+      cachedDefaultLocationId = lab.id
+      return lab.id
+    }
+  } catch {}
+  return '00000000-0000-0000-0000-000000000001'
+}
+
 /**
  * Inserta un evento de acceso en access_logs.
  * Soporta de forma transparente tanto location_id (esquema actual) como lab_id (esquema anterior).
@@ -109,13 +133,17 @@ export async function uploadAccessPhoto(dataUrl, matricula = 'DESCONOCIDO') {
 export async function insertAccessLog({
   studentId, labId, locationId, status, movementType, photoUrl = null, notes = null
 }) {
-  const locId = locationId || labId || null
+  let locId = locationId || labId || null
+  if (!locId) {
+    locId = await getDefaultLocationId()
+  }
+
   const normalizedStatus =
     (status === 'PERMITIDO' || status === 'granted') ? 'granted' :
     (status === 'INTRUSO' || status === 'intrusion') ? 'intrusion' :
     'denied'
 
-  // Intentar con location_id (esquema oficial)
+  // 1. Intentar con location_id (esquema oficial)
   const payloadLocation = {
     student_id:    studentId || null,
     location_id:   locId,
@@ -130,29 +158,48 @@ export async function insertAccessLog({
     .from('access_logs')
     .insert(payloadLocation)
     .select()
-    .single()
+    .maybeSingle()
 
-  if (!error) return data
+  if (!error) return data || payloadLocation
+  if (error.code === 'PGRST116') return payloadLocation
 
-  // Si la columna location_id no existe en la base de datos aún, usar lab_id
-  const payloadLab = {
-    student_id:    studentId || null,
-    lab_id:        locId,
-    status:        normalizedStatus,
-    movement_type: movementType || 'entry',
-    photo_url:     photoUrl,
-    notes,
-    synced_at:     new Date().toISOString()
+  // 2. Si la columna location_id no existe en la base de datos aún (error 42703), usar lab_id
+  if (error.code === '42703' || error.message?.includes('location_id')) {
+    const payloadLab = {
+      student_id:    studentId || null,
+      lab_id:        locId,
+      status:        normalizedStatus,
+      movement_type: movementType || 'entry',
+      photo_url:     photoUrl,
+      notes,
+      synced_at:     new Date().toISOString()
+    }
+
+    const { data: dataLab, error: errLab } = await supabase
+      .from('access_logs')
+      .insert(payloadLab)
+      .select()
+      .maybeSingle()
+
+    if (!errLab || errLab.code === 'PGRST116') return dataLab || payloadLab
+    throw errLab
   }
 
-  const { data: dataLab, error: errLab } = await supabase
-    .from('access_logs')
-    .insert(payloadLab)
-    .select()
-    .single()
+  // 3. Si falló por clave foránea (el ID de ubicación no existe en la BD), resolver primer ID real
+  if (error.code === '23503' || error.message?.includes('foreign key')) {
+    const fallbackId = await getDefaultLocationId()
+    if (fallbackId && fallbackId !== locId) {
+      payloadLocation.location_id = fallbackId
+      const { data: retryData, error: retryErr } = await supabase
+        .from('access_logs')
+        .insert(payloadLocation)
+        .select()
+        .maybeSingle()
+      if (!retryErr || retryErr.code === 'PGRST116') return retryData || payloadLocation
+    }
+  }
 
-  if (errLab) throw error || errLab
-  return dataLab
+  throw error
 }
 
 /**

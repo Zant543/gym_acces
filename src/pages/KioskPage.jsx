@@ -333,6 +333,24 @@ export default function KioskPage() {
       message     = 'MEMBRESÍA VENCIDA / NO REGISTRADO'
     }
 
+    // Garantizar que si el acceso fue concedido, tengamos el studentId para que aparezca en el Dashboard
+    if (allowed && !studentId && isOnline) {
+      try {
+        const { data: stu } = await supabase
+          .from('students')
+          .select('id, full_name, career')
+          .ilike('matricula', String(matricula).trim())
+          .maybeSingle()
+        if (stu?.id) {
+          studentId   = stu.id
+          if (!studentName || studentName === 'Socio') studentName = stu.full_name
+          if (!career) career = stu.career
+        }
+      } catch (e) {
+        console.warn('[Kiosk] No se pudo recuperar ID del socio:', e?.message)
+      }
+    }
+
     const finalMovement = movement === 'exit' ? 'exit' : 'entry'
     const photoDataUrl = (!allowed && videoRef.current)
       ? capturePhotoDataUrl(videoRef.current)
@@ -367,7 +385,7 @@ export default function KioskPage() {
     // ── Registro en la tabla 'access_logs': enum granted / denied ──
     try {
       if (isOnline) {
-        await insertAccessLog({
+        const logResult = await insertAccessLog({
           studentId:    studentId || null,
           locationId:   activeLocationId,
           labId:        activeLocationId,
@@ -376,7 +394,7 @@ export default function KioskPage() {
           photoUrl:     savedPhotoUrl,
           notes:        `${finalStatus === 'granted' ? 'Acceso concedido' : 'Acceso denegado'}: Socio ${matricula} - ${studentName || ''}`
         })
-        console.log(`[Kiosk] Bitácora registrada: ${finalStatus} (${matricula})`)
+        console.log(`[Kiosk] Bitácora registrada con éxito: ${finalStatus} (${matricula}) LogID=${logResult?.id || 'ok'}`)
       } else {
         await enqueueEvent({
           locationId:   activeLocationId,

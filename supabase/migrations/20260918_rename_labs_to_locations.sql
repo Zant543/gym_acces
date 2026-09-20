@@ -88,17 +88,31 @@ CREATE POLICY "locations_read_all"    ON locations FOR SELECT TO authenticated U
 CREATE POLICY "locations_admin_write" ON locations FOR ALL    TO authenticated
   USING (get_user_role() = 'admin') WITH CHECK (get_user_role() = 'admin');
 
+DROP POLICY IF EXISTS "logs_kiosk_insert" ON access_logs;
+CREATE POLICY "logs_kiosk_insert" ON access_logs FOR INSERT TO authenticated
+  WITH CHECK (get_user_role() IN ('kiosco', 'admin', 'docente'));
+
 CREATE POLICY "logs_teacher_read" ON access_logs FOR SELECT TO authenticated
   USING (
-    get_user_role() IN ('docente')
+    get_user_role() IN ('admin', 'docente', 'kiosco')
     AND (
-      location_id = get_user_location_id()
-      OR location_id IN (
-        SELECT s.location_id FROM schedules s
-        WHERE s.teacher_id = auth.uid()
-      )
+      get_user_location_id() IS NULL
+      OR location_id IS NULL
+      OR location_id = get_user_location_id()
     )
   );
+
+-- Habilitar Realtime
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables
+    WHERE pubname = 'supabase_realtime' AND tablename = 'access_logs'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE access_logs;
+  END IF;
+END $$;
+ALTER TABLE access_logs REPLICA IDENTITY FULL;
 
 -- ------------------------------------------------------------------------------
 -- 7. ACTUALIZAR FUNCIÓN validate_access (soporta p_location_id)

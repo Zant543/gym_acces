@@ -1,4 +1,4 @@
-﻿/**
+/**
  * TeacherDashboard — /docente
  * Monitoreo en tiempo real de socios presentes en las últimas 2 horas.
  * Vista directa y fija para Recepción / Gimnasio.
@@ -29,10 +29,23 @@ function formatDuration(ts) {
   if (!ts) return ''
   const diffMs = Date.now() - new Date(ts).getTime()
   const mins = Math.floor(diffMs / 60000)
-  if (mins < 60) return `hace ${mins} min`
+  if (mins < 1) return 'recién ingresó'
+  if (mins < 60) return `lleva ${mins} min`
   const hrs = Math.floor(mins / 60)
   const rem = mins % 60
-  return rem > 0 ? `hace ${hrs}h ${rem}min` : `hace ${hrs}h`
+  return rem > 0 ? `lleva ${hrs}h ${rem}min` : `lleva ${hrs}h`
+}
+
+function formatRemaining(ts) {
+  if (!ts) return ''
+  const elapsed = Date.now() - new Date(ts).getTime()
+  const remainingMs = TWO_HOURS_MS - elapsed
+  if (remainingMs <= 0) return 'tiempo cumplido (2h)'
+  const minsLeft = Math.floor(remainingMs / 60000)
+  if (minsLeft < 60) return `restan ${minsLeft} min`
+  const hrs = Math.floor(minsLeft / 60)
+  const rem = minsLeft % 60
+  return rem > 0 ? `restan ${hrs}h ${rem}min` : `resta ${hrs}h`
 }
 
 export default function TeacherDashboard() {
@@ -42,9 +55,20 @@ export default function TeacherDashboard() {
   const [presentSocios, setPresentSocios] = useState([])
   const [loading,       setLoading]       = useState(false)
   const [lastUpdate,    setLastUpdate]    = useState(null)
-  const [isOnline]                        = useState(navigator.onLine)
+  const [isOnline,      setIsOnline]      = useState(navigator.onLine)
+  const [,              setTick]          = useState(0)
 
-  const expiryTimerRef = useRef(null)
+  // Monitorear conectividad a internet en vivo
+  useEffect(() => {
+    const onOnline  = () => setIsOnline(true)
+    const onOffline = () => setIsOnline(false)
+    window.addEventListener('online', onOnline)
+    window.addEventListener('offline', onOffline)
+    return () => {
+      window.removeEventListener('online', onOnline)
+      window.removeEventListener('offline', onOffline)
+    }
+  }, [])
 
   // ── 1. Cargar socios presentes en las últimas 2 horas ─────────
   const loadPresentSocios = useCallback(async () => {
@@ -53,41 +77,52 @@ export default function TeacherDashboard() {
       const twoHoursAgo = new Date(Date.now() - TWO_HOURS_MS).toISOString()
       const { data: logs, error: logsErr } = await supabase
         .from('access_logs')
-        .select('student_id, status, timestamp')
-        .in('status', ['PERMITIDO', 'granted'])
+        .select('id, student_id, status, movement_type, timestamp')
         .gte('timestamp', twoHoursAgo)
         .order('timestamp', { ascending: false })
 
       if (logsErr) console.warn('[Dashboard] Error consultando logs:', logsErr.message)
 
       const seenIds = new Set()
-      const recentLogs = (logs || []).filter(l => {
-        if (!l.student_id || seenIds.has(l.student_id)) return false
-        seenIds.add(l.student_id)
-        return true
-      })
+      const presentLogs = []
 
-      if (recentLogs.length === 0) {
+      for (const log of (logs || [])) {
+        if (!log.student_id) continue
+        if (seenIds.has(log.student_id)) continue
+        seenIds.add(log.student_id)
+
+        // Solo considerar accesos concedidos
+        if (!['PERMITIDO', 'granted'].includes(log.status)) continue
+
+        // Si su movimiento más reciente en la ventana fue una salida, ya no está en el gimnasio
+        if (log.movement_type === 'exit') continue
+
+        presentLogs.push(log)
+      }
+
+      if (presentLogs.length === 0) {
         setPresentSocios([])
         setLastUpdate(new Date().toISOString())
         setLoading(false)
         return
       }
 
-      const studentIds = recentLogs.map(l => l.student_id)
-      const { data: studentsData } = await supabase
+      const studentIds = presentLogs.map(l => l.student_id)
+      const { data: studentsData, error: stuErr } = await supabase
         .from('students')
         .select('id, matricula, full_name, career')
         .in('id', studentIds)
 
+      if (stuErr) console.warn('[Dashboard] Error consultando socios:', stuErr.message)
+
       const studentsMap = {}
       ;(studentsData || []).forEach(s => { studentsMap[s.id] = s })
 
-      const sociosList = recentLogs.map(log => {
+      const sociosList = presentLogs.map(log => {
         const s = studentsMap[log.student_id] || {}
         return {
           studentId: log.student_id,
-          fullName:  s.full_name  || 'Socio Desconocido',
+          fullName:  s.full_name  || 'Socio',
           matricula: s.matricula  || '-',
           career:    s.career     || '-',
           enteredAt: log.timestamp,
@@ -108,16 +143,17 @@ export default function TeacherDashboard() {
     loadPresentSocios()
   }, [loadPresentSocios])
 
-  // ── 2. Timer cada 60s para remover socios expirados (> 2h) ────
+  // ── 2. Timer cada 15s: auto-expiración (> 2h) y actualización de permanencia ──
   useEffect(() => {
-    expiryTimerRef.current = setInterval(() => {
+    const timer = setInterval(() => {
       const cutoff = Date.now() - TWO_HOURS_MS
       setPresentSocios(prev => prev.filter(s => new Date(s.enteredAt).getTime() >= cutoff))
-    }, 60_000)
-    return () => clearInterval(expiryTimerRef.current)
+      setTick(t => t + 1)
+    }, 15_000)
+    return () => clearInterval(timer)
   }, [])
 
-  // ── 3. Realtime: agregar nuevos accesos permitidos en vivo ────
+  // ── 3. Realtime: sincronización en vivo cuando ingresan o salen socios ──
   useRealtimeChannel({
     channelName: 'teacher_gym_presence',
     table:       'access_logs',
@@ -127,26 +163,37 @@ export default function TeacherDashboard() {
       const log = payload?.new
       if (!log?.student_id) return
       if (!['PERMITIDO', 'granted'].includes(log.status)) return
-      const enteredAt = log.timestamp || new Date().toISOString()
-      if (Date.now() - new Date(enteredAt).getTime() > TWO_HOURS_MS) return
 
+      // Si el socio registró salida en el Kiosco, removerlo de la lista inmediatamente
+      if (log.movement_type === 'exit') {
+        setPresentSocios(prev => prev.filter(s => s.studentId !== log.student_id))
+        setLastUpdate(new Date().toISOString())
+        return
+      }
+
+      // Si es una entrada, verificar ventana de 2 horas
+      const enteredAt = log.timestamp || new Date().toISOString()
+      const diffMs = Date.now() - new Date(enteredAt).getTime()
+      if (diffMs > TWO_HOURS_MS) return
+
+      // Consultar datos del socio si no están en memoria
       const { data: stuData } = await supabase
         .from('students')
         .select('id, matricula, full_name, career')
         .eq('id', log.student_id)
-        .single()
+        .maybeSingle()
 
       setPresentSocios(prev => {
         const newEntry = {
           studentId: log.student_id,
-          fullName:  stuData?.full_name  || 'Socio Desconocido',
+          fullName:  stuData?.full_name  || 'Socio',
           matricula: stuData?.matricula  || '-',
           career:    stuData?.career     || '-',
           enteredAt,
         }
-        const exists = prev.find(s => s.studentId === log.student_id)
-        if (exists) return prev.map(s => s.studentId === log.student_id ? newEntry : s)
-        return [newEntry, ...prev]
+        // Evitar duplicados y poner al nuevo socio al inicio
+        const filtered = prev.filter(s => s.studentId !== log.student_id)
+        return [newEntry, ...filtered]
       })
       setLastUpdate(new Date().toISOString())
     }, [])
@@ -262,7 +309,7 @@ export default function TeacherDashboard() {
             <div className="grid grid-cols-[1fr_auto_auto] gap-4 px-4 py-2.5 border-b border-zinc-700 text-zinc-500 text-xs uppercase tracking-wider font-medium">
               <span>Socio</span>
               <span className="hidden sm:block">ID de Socio</span>
-              <span>Entrada</span>
+              <span className="text-right">Entrada / Permanencia</span>
             </div>
             <div className="divide-y divide-zinc-800">
               {presentSocios.map((socio, idx) => (
@@ -271,10 +318,11 @@ export default function TeacherDashboard() {
                     <p className="text-white text-sm font-medium leading-tight">{socio.fullName}</p>
                     <p className="text-zinc-500 text-xs">{socio.career}</p>
                   </div>
-                  <span className="hidden sm:block text-zinc-500 text-xs font-mono">{socio.matricula}</span>
+                  <span className="hidden sm:block text-zinc-400 text-xs font-mono">{socio.matricula}</span>
                   <div className="text-right">
                     <span className="text-green-400 text-xs font-mono font-semibold whitespace-nowrap block">{formatTime(socio.enteredAt)}</span>
-                    <span className="text-zinc-600 text-[10px] whitespace-nowrap block">{formatDuration(socio.enteredAt)}</span>
+                    <span className="text-zinc-300 text-[11px] whitespace-nowrap block">{formatDuration(socio.enteredAt)}</span>
+                    <span className="text-yellow-400/80 text-[10px] whitespace-nowrap block">{formatRemaining(socio.enteredAt)}</span>
                   </div>
                 </div>
               ))}
