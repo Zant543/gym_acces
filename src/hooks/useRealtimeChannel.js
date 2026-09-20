@@ -8,7 +8,7 @@ import { supabase } from '../lib/supabase'
  * @param {string}   channelName   - Nombre único del canal
  * @param {string}   table         - Tabla a escuchar
  * @param {string}   event         - 'INSERT' | 'UPDATE' | 'DELETE' | '*'
- * @param {string}   [filter]      - Filtro de columna ej: 'lab_id=eq.xxxx'
+ * @param {string}   [filter]      - Filtro de columna ej: 'location_id=eq.xxxx'
  * @param {Function} onEvent       - Callback(payload) llamado en cada evento
  * @param {boolean}  [enabled]     - false para desactivar (por defecto true)
  */

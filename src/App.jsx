@@ -99,9 +99,17 @@ export default function App() {
           </ProtectedRoute>
         } />
 
-        {/* Panel Principal del Administrador — redirige a sincronización */}
-        <Route path="/admin" element={<Navigate to="/admin/sync" replace />} />
-        <Route path="/dashboard" element={<Navigate to="/admin/sync" replace />} />
+        {/* Panel Principal del Administrador (Hub de Módulos) */}
+        <Route path="/admin" element={
+          <ProtectedRoute allowedRoles={['admin']}>
+            <HomePage />
+          </ProtectedRoute>
+        } />
+        <Route path="/dashboard" element={
+          <ProtectedRoute allowedRoles={['admin']}>
+            <HomePage />
+          </ProtectedRoute>
+        } />
 
         {/* Módulo Docente */}
         <Route path="/docente" element={

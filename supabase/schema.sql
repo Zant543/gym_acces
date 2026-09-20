@@ -35,7 +35,17 @@ CREATE TABLE IF NOT EXISTS labs (
   created_at   TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 3.2 Socios
+-- 3.2 Perfiles de usuario (roles del sistema)
+-- Creado antes de schedules para resolver la dependencia foránea teacher_id REFERENCES profiles(id)
+CREATE TABLE IF NOT EXISTS profiles (
+  id         UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  role       TEXT NOT NULL CHECK (role IN ('admin', 'docente', 'kiosco')),
+  lab_id     UUID REFERENCES labs(id),    -- para kiosco/docente: su ubicación asignada
+  full_name  TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 3.3 Socios
 CREATE TABLE IF NOT EXISTS students (
   id           UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   matricula    TEXT UNIQUE NOT NULL,             -- ID / Clave de Socio
@@ -48,7 +58,7 @@ CREATE TABLE IF NOT EXISTS students (
 CREATE INDEX IF NOT EXISTS idx_students_matricula ON students USING btree (matricula);
 CREATE INDEX IF NOT EXISTS idx_students_name_trgm  ON students USING gin  (full_name gin_trgm_ops);
 
--- 3.3 Horarios de práctica
+-- 3.4 Horarios de práctica
 CREATE TABLE IF NOT EXISTS schedules (
   id           UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   lab_id       UUID NOT NULL REFERENCES labs(id) ON DELETE CASCADE,
@@ -65,7 +75,7 @@ CREATE TABLE IF NOT EXISTS schedules (
 CREATE INDEX IF NOT EXISTS idx_schedules_lab ON schedules(lab_id);
 CREATE INDEX IF NOT EXISTS idx_schedules_teacher ON schedules(teacher_id);
 
--- 3.4 Inscripciones
+-- 3.5 Inscripciones
 CREATE TABLE IF NOT EXISTS enrollments (
   id           UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   student_id   UUID NOT NULL REFERENCES students(id)  ON DELETE CASCADE,
@@ -76,7 +86,7 @@ CREATE TABLE IF NOT EXISTS enrollments (
 CREATE INDEX IF NOT EXISTS idx_enrollments_student  ON enrollments(student_id);
 CREATE INDEX IF NOT EXISTS idx_enrollments_schedule ON enrollments(schedule_id);
 
--- 3.5 Registro de accesos / eventos
+-- 3.6 Registro de accesos / eventos
 CREATE TABLE IF NOT EXISTS access_logs (
   id             UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   student_id     UUID REFERENCES students(id) ON DELETE SET NULL,  -- NULL = desconocido
@@ -91,15 +101,6 @@ CREATE TABLE IF NOT EXISTS access_logs (
 CREATE INDEX IF NOT EXISTS idx_access_logs_lab       ON access_logs(lab_id, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_access_logs_student   ON access_logs(student_id, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_access_logs_status    ON access_logs(status);
-
--- 3.6 Perfiles de usuario (roles del sistema)
-CREATE TABLE IF NOT EXISTS profiles (
-  id         UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
-  role       TEXT NOT NULL CHECK (role IN ('admin', 'docente', 'kiosco')),
-  lab_id     UUID REFERENCES labs(id),    -- para kiosco/docente: su ubicación asignada
-  full_name  TEXT,
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
 
 
 -- 3.7 Cola de sincronización offline (espejo local de SyncQueue de IndexedDB)

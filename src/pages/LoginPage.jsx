@@ -79,7 +79,7 @@ export default function LoginPage() {
             {/* Email */}
             <div>
               <label className="text-zinc-400 text-xs font-medium block mb-1.5">
-                Correo institucional
+                Correo electrónico
               </label>
               <div className="relative">
                 <Mail size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500 pointer-events-none" />
@@ -88,7 +88,7 @@ export default function LoginPage() {
                   value={email}
                   onChange={e => setEmail(e.target.value)}
                   className="siitec-input pl-9"
-                  placeholder="usuario@tecnm-colima.edu.mx"
+                  placeholder="admin@gimnasioaccess.com"
                   required
                   autoComplete="email"
                 />

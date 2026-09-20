@@ -20,11 +20,11 @@ import {
   terminateOCRWorker, drawOverlay, captureCredentialSnapshot
 } from '../lib/ocr'
 import { scanBarcode, extractMatriculaFromBarcode } from '../lib/barcode'
-import { supabase, insertAccessLog, uploadAccessPhoto } from '../lib/supabase'
+import { supabase, insertAccessLog, uploadAccessPhoto, rpcValidateAccess } from '../lib/supabase'
 import { checkAccessOffline, enqueueEvent } from '../lib/db'
 
-const DEFAULT_FALLBACK_LAB_ID = import.meta.env.VITE_KIOSK_LAB_ID || '11111111-1111-1111-1111-111111111111'
-const DEBUG                   = import.meta.env.VITE_DEBUG_MODE === 'true'
+const DEFAULT_FALLBACK_LOCATION_ID = import.meta.env.VITE_KIOSK_LOCATION_ID || import.meta.env.VITE_KIOSK_LAB_ID || '00000000-0000-0000-0000-000000000001'
+const DEBUG                        = import.meta.env.VITE_DEBUG_MODE === 'true'
 
 const STATES = {
   IDLE:        'idle',
@@ -69,17 +69,17 @@ export default function KioskPage() {
   const cooldownUntilRef = useRef(0)
   const lastScannedMatriculaRef = useRef({ code: '', time: 0 })
 
-  const [activeLabId,   setActiveLabId]   = useState(profile?.lab_id || DEFAULT_FALLBACK_LAB_ID)
-  const [kioskState,    setKioskState]    = useState(STATES.IDLE)
-  const [cameraOk,      setCameraOk]      = useState(false)
-  const [ocrReady,      setOcrReady]      = useState(false)
-  const [resultData,    setResultData]    = useState(null)
-  const [lastScan,      setLastScan]      = useState(null)
-  const [movement,      setMovement]      = useState('entry') // 'entry' | 'exit'
-  const [ocrProgress,   setOcrProgress]   = useState(0)
-  const [pendingQueue,  setPendingQueue]  = useState(0)
-  const [manualInput,   setManualInput]   = useState('')
-  const [showDebugMenu, setShowDebugMenu] = useState(false)
+  const [activeLocationId, setActiveLocationId] = useState(profile?.location_id || profile?.lab_id || DEFAULT_FALLBACK_LOCATION_ID)
+  const [kioskState,       setKioskState]       = useState(STATES.IDLE)
+  const [cameraOk,         setCameraOk]         = useState(false)
+  const [ocrReady,         setOcrReady]         = useState(false)
+  const [resultData,       setResultData]       = useState(null)
+  const [lastScan,         setLastScan]         = useState(null)
+  const [movement,         setMovement]         = useState('entry') // 'entry' | 'exit'
+  const [ocrProgress,      setOcrProgress]      = useState(0)
+  const [pendingQueue,     setPendingQueue]     = useState(0)
+  const [manualInput,      setManualInput]      = useState('')
+  const [showDebugMenu,    setShowDebugMenu]    = useState(false)
 
   // ── Nuevos estados para snapshot, barcode y debug panel ──────────
   const [autoSnapshotEnabled, setAutoSnapshotEnabled] = useState(true)
@@ -87,20 +87,36 @@ export default function KioskPage() {
   const [debugInfo,           setDebugInfo]           = useState(null)
   // debugInfo: { colorDataUrl, binarizedDataUrl, rawText, confidence, timeTaken, barcodeResult, timestamp }
 
-  const { isOnline, pendingCount, downloadAccessRules } = useOfflineSync(activeLabId)
+  const { isOnline, pendingCount, downloadAccessRules } = useOfflineSync(activeLocationId)
 
   // ── 1. Ubicación fija de la unidad (Recepción / Gimnasio) ────────
   useEffect(() => {
-    // Si la base de datos requiere UUID válido por foreign key en access_logs, obtener el primero en segundo plano
-    supabase
-      .from('labs')
-      .select('id')
-      .limit(1)
-      .maybeSingle()
-      .then(({ data }) => {
-        if (data?.id) setActiveLabId(data.id)
-      })
-      .catch(() => {})
+    async function resolveDefaultLocation() {
+      // Intentar primero con locations (esquema oficial)
+      const { data: loc } = await supabase
+        .from('locations')
+        .select('id')
+        .limit(1)
+        .maybeSingle()
+
+      if (loc?.id) {
+        setActiveLocationId(loc.id)
+        return
+      }
+
+      // Fallback con labs si el esquema aún no fue migrado
+      const { data: lab } = await supabase
+        .from('labs')
+        .select('id')
+        .limit(1)
+        .maybeSingle()
+
+      if (lab?.id) {
+        setActiveLocationId(lab.id)
+      }
+    }
+
+    resolveDefaultLocation().catch(() => {})
   }, [])
 
   // ── 2. Inicializar Cámara WebRTC (falla silenciosa → solo pad numérico) ─────
@@ -242,70 +258,70 @@ export default function KioskPage() {
 
     try {
       if (isOnline) {
-        // Consulta directa a la tabla students por matrícula/clave
-        const { data: socio, error: stuErr } = await supabase
-          .from('students')
-          .select('*')
-          .eq('matricula', matricula)
-          .maybeSingle()
+        try {
+          // 1. Usar la función centralizada de PostgreSQL validate_access
+          const rpcRes = await rpcValidateAccess(matricula, activeLocationId)
+          if (rpcRes) {
+            allowed     = rpcRes.allowed ?? false
+            studentId   = rpcRes.student_id || null
+            studentName = rpcRes.full_name || (allowed ? 'Socio' : 'No Registrado')
+            career      = rpcRes.career || null
+            finalStatus = rpcRes.status || (allowed ? 'granted' : 'denied')
+            message     = (rpcRes.message || (allowed ? 'ACCESO CONCEDIDO - ¡BIENVENIDO!' : 'MEMBRESÍA VENCIDA / NO REGISTRADO')).toUpperCase()
+          }
+        } catch (rpcErr) {
+          console.warn('[Kiosk] Fallo RPC validate_access, ejecutando consulta directa de contingencia:', rpcErr?.message)
+          const { data: socio, error: stuErr } = await supabase
+            .from('students')
+            .select('*')
+            .eq('matricula', matricula)
+            .maybeSingle()
 
-        if (!stuErr && socio) {
-          // Socio existe
-          if (socio.is_active === true) {
-            // Verificar fecha de vencimiento si existe
-            const expDate = socio.expiration_date ? new Date(socio.expiration_date) : null
-            const isExpired = expDate ? expDate < new Date() : false
-
-            if (!isExpired) {
-              // Caso Éxito (VERDE - Acceso Concedido)
-              allowed     = true
-              studentId   = socio.id
-              studentName = socio.full_name
-              career      = socio.career || null
-              photoUrl    = socio.photo_url || null
-              finalStatus = 'granted'
-              message     = 'ACCESO CONCEDIDO - ¡BIENVENIDO!'
-            } else {
-              // Membresía con fecha vencida
-              allowed     = false
-              studentId   = socio.id
-              studentName = socio.full_name
-              career      = socio.career || null
-              photoUrl    = socio.photo_url || null
-              finalStatus = 'denied'
-              message     = 'MEMBRESÍA VENCIDA / FECHA EXPIRADA'
-            }
-          } else {
-            // Caso Alerta (ROJO - Membresía Vencida / Inactiva)
-            allowed     = false
+          if (!stuErr && socio) {
             studentId   = socio.id
             studentName = socio.full_name
             career      = socio.career || null
             photoUrl    = socio.photo_url || null
+
+            if (socio.is_active === true) {
+              const expDate = socio.expiration_date ? new Date(socio.expiration_date) : null
+              const isExpired = expDate ? expDate < new Date() : false
+              if (!isExpired) {
+                allowed     = true
+                finalStatus = 'granted'
+                message     = 'ACCESO CONCEDIDO - ¡BIENVENIDO!'
+              } else {
+                allowed     = false
+                finalStatus = 'denied'
+                message     = 'MEMBRESÍA VENCIDA / FECHA EXPIRADA'
+              }
+            } else {
+              allowed     = false
+              finalStatus = 'denied'
+              message     = 'MEMBRESÍA INACTIVA O SUSPENDIDA'
+            }
+          } else {
+            allowed     = false
+            studentId   = null
+            studentName = 'No Registrado'
+            career      = null
             finalStatus = 'denied'
             message     = 'MEMBRESÍA VENCIDA / NO REGISTRADO'
           }
-        } else {
-          // Caso Alerta (ROJO - Socio NO existe)
-          allowed     = false
-          studentId   = null
-          studentName = 'No Registrado'
-          career      = null
-          photoUrl    = null
-          finalStatus = 'denied'
-          message     = 'MEMBRESÍA VENCIDA / NO REGISTRADO'
         }
       } else {
         // Modo sin conexión: verificar en IndexedDB local
-        const offlineResult = await checkAccessOffline(matricula, activeLabId)
+        const offlineResult = await checkAccessOffline(matricula)
         if (offlineResult?.allowed) {
           allowed     = true
           studentName = offlineResult?.rule?.studentName || 'Socio'
+          career      = offlineResult?.rule?.career || null
           finalStatus = 'granted'
           message     = 'ACCESO CONCEDIDO - ¡BIENVENIDO!'
         } else {
           allowed     = false
-          studentName = 'No Registrado'
+          studentName = offlineResult?.rule?.studentName || 'No Registrado'
+          career      = offlineResult?.rule?.career || null
           finalStatus = 'denied'
           message     = 'MEMBRESÍA VENCIDA / NO REGISTRADO'
         }
@@ -351,36 +367,23 @@ export default function KioskPage() {
     // ── Registro en la tabla 'access_logs': enum granted / denied ──
     try {
       if (isOnline) {
-        // Inserción directa con estatus enum oficial PostgreSQL ('granted' o 'denied')
-        const { error: insErr } = await supabase.from('access_logs').insert([
-          {
-            student_id:    studentId || null,
-            status:        finalStatus,
-            lab_id:        activeLabId,
-            movement_type: finalMovement,
-            photo_url:     savedPhotoUrl,
-            notes:         `${finalStatus === 'granted' ? 'Acceso concedido' : 'Acceso denegado'}: Socio ${matricula} - ${studentName || ''}`
-          }
-        ])
-
-        if (insErr) {
-          // Fallback con helper normalizado
-          await insertAccessLog({
-            studentId:    studentId || null,
-            labId:        activeLabId,
-            status:       finalStatus,
-            movementType: finalMovement,
-            photoUrl:     savedPhotoUrl,
-            notes:        `${finalStatus}: Clave ${matricula} - ${studentName || ''}`
-          })
-        }
+        await insertAccessLog({
+          studentId:    studentId || null,
+          locationId:   activeLocationId,
+          labId:        activeLocationId,
+          status:       finalStatus,
+          movementType: finalMovement,
+          photoUrl:     savedPhotoUrl,
+          notes:        `${finalStatus === 'granted' ? 'Acceso concedido' : 'Acceso denegado'}: Socio ${matricula} - ${studentName || ''}`
+        })
         console.log(`[Kiosk] Bitácora registrada: ${finalStatus} (${matricula})`)
       } else {
         await enqueueEvent({
-          labId: activeLabId,
+          locationId:   activeLocationId,
+          labId:        activeLocationId,
           studentId,
           matricula,
-          status: finalStatus,
+          status:       finalStatus,
           movementType: finalMovement,
           photoDataUrl,
         })
@@ -389,7 +392,7 @@ export default function KioskPage() {
     } catch (err) {
       console.warn('[Kiosk] No se pudo escribir en access_logs:', err?.message)
     }
-  }, [activeLabId, isOnline, kioskState, movement])
+  }, [activeLocationId, isOnline, kioskState, movement])
 
   // ── 6. Captura de Snapshot: Barcode → OCR (Modo Disparo Estático) ─
   const runSnapshot = useCallback(async ({ isManual = false } = {}) => {

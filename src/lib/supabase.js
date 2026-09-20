@@ -34,20 +34,24 @@ export const supabase = createClient(
  * @returns {Promise<{allowed:boolean, reason:string, message:string, student_id?:string, full_name?:string, career?:string}>}
  */
 export async function rpcValidateAccess(matricula, locationId) {
-  try {
-    const { data, error } = await supabase
-      .rpc('validate_access', { p_matricula: matricula, p_lab_id: locationId, p_location_id: locationId })
+  // 1. Intentar con p_location_id (esquema oficial renombrado)
+  if (locationId) {
+    const resLoc = await supabase
+      .rpc('validate_access', { p_matricula: matricula, p_location_id: locationId })
+    if (!resLoc.error) return resLoc.data
 
-    if (!error) return data
-  } catch {
-    // Intento con parámetro único si la versión del esquema no acepta ambos
+    // 2. Si falla porque la base de datos conserva el parámetro previo, intentar con p_lab_id
+    const resLab = await supabase
+      .rpc('validate_access', { p_matricula: matricula, p_lab_id: locationId })
+    if (!resLab.error) return resLab.data
   }
 
-  const { data, error } = await supabase
+  // 3. Fallback en caso de función de parámetro único
+  const resMat = await supabase
     .rpc('validate_access', { p_matricula: matricula })
+  if (!resMat.error) return resMat.data
 
-  if (error) throw error
-  return data
+  throw resMat.error
 }
 
 /**
@@ -79,7 +83,7 @@ export async function uploadAccessPhoto(dataUrl, matricula = 'DESCONOCIDO') {
     }
 
     // Para buckets privados, generar Signed URL temporal (7 días)
-    const { data: signedData, error: signErr } = await supabase.storage
+    const { data: signedData } = await supabase.storage
       .from('access-photos')
       .createSignedUrl(filePath, 60 * 60 * 24 * 7)
 
@@ -100,54 +104,77 @@ export async function uploadAccessPhoto(dataUrl, matricula = 'DESCONOCIDO') {
 
 /**
  * Inserta un evento de acceso en access_logs.
+ * Soporta de forma transparente tanto location_id (esquema actual) como lab_id (esquema anterior).
  */
 export async function insertAccessLog({
   studentId, labId, locationId, status, movementType, photoUrl = null, notes = null
 }) {
   const locId = locationId || labId || null
-  // Normalizar estatus para respetar el enum access_status ('granted', 'denied', 'intrusion')
   const normalizedStatus =
     (status === 'PERMITIDO' || status === 'granted') ? 'granted' :
     (status === 'INTRUSO' || status === 'intrusion') ? 'intrusion' :
     'denied'
 
+  // Intentar con location_id (esquema oficial)
+  const payloadLocation = {
+    student_id:    studentId || null,
+    location_id:   locId,
+    status:        normalizedStatus,
+    movement_type: movementType || 'entry',
+    photo_url:     photoUrl,
+    notes,
+    synced_at:     new Date().toISOString()
+  }
+
   const { data, error } = await supabase
     .from('access_logs')
-    .insert({
-      student_id:    studentId || null,
-      lab_id:        locId,
-      status:        normalizedStatus,
-      movement_type: movementType || 'entry',
-      photo_url:     photoUrl,
-      notes,
-      synced_at:     new Date().toISOString()
-    })
+    .insert(payloadLocation)
     .select()
     .single()
 
-  if (error) throw error
-  return data
+  if (!error) return data
+
+  // Si la columna location_id no existe en la base de datos aún, usar lab_id
+  const payloadLab = {
+    student_id:    studentId || null,
+    lab_id:        locId,
+    status:        normalizedStatus,
+    movement_type: movementType || 'entry',
+    photo_url:     photoUrl,
+    notes,
+    synced_at:     new Date().toISOString()
+  }
+
+  const { data: dataLab, error: errLab } = await supabase
+    .from('access_logs')
+    .insert(payloadLab)
+    .select()
+    .single()
+
+  if (errLab) throw error || errLab
+  return dataLab
 }
 
 /**
- * Suscripción Realtime al canal de un laboratorio específico.
- * Retorna un objeto canal de Supabase.
+ * Suscripción Realtime al canal de una ubicación específica.
  */
-export function subscribeToLabLogs(labId, onInsert) {
+export function subscribeToLocationLogs(locationId, onInsert) {
   return supabase
-    .channel(`lab_logs:${labId}`)
+    .channel(`location_logs:${locationId}`)
     .on(
       'postgres_changes',
       {
         event:  'INSERT',
         schema: 'public',
         table:  'access_logs',
-        filter: `lab_id=eq.${labId}`
+        filter: `location_id=eq.${locationId}`
       },
       (payload) => onInsert(payload.new)
     )
     .subscribe()
 }
+
+export const subscribeToLabLogs = subscribeToLocationLogs
 
 /**
  * Suscripción Realtime a alertas de seguridad (denied + intrusion globales).

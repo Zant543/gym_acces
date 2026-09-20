@@ -77,16 +77,26 @@ export function useOfflineSync(labId) {
             }
           }
 
-          const { error: insErr } = await supabase.from('access_logs').insert({
+          const locId = event.locationId || event.labId || null
+          const payloadLocation = {
             student_id:    event.studentId || null,
-            lab_id:        event.labId,
+            location_id:   locId,
             status:        normalizedStatus,
             movement_type: event.movementType || 'entry',
             photo_url:     photoUrl,
             timestamp:     event.timestamp,
             notes:         'Evento offline sincronizado al reconectar',
             synced_at:     new Date().toISOString()
-          })
+          }
+
+          let { error: insErr } = await supabase.from('access_logs').insert(payloadLocation)
+          if (insErr) {
+            // Fallback si la base de datos aún tiene la columna lab_id
+            const payloadLab = { ...payloadLocation, lab_id: locId }
+            delete payloadLab.location_id
+            const resLab = await supabase.from('access_logs').insert(payloadLab)
+            insErr = resLab.error
+          }
 
           if (!insErr) {
             await markEventSynced(event.id)

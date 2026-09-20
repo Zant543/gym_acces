@@ -103,6 +103,10 @@ CREATE POLICY "logs_teacher_read" ON access_logs FOR SELECT TO authenticated
 -- ------------------------------------------------------------------------------
 -- 7. ACTUALIZAR FUNCIÓN validate_access (soporta p_location_id)
 -- ------------------------------------------------------------------------------
+-- Se deben eliminar las firmas previas antes de recrear con nuevo nombre de parámetro (p_lab_id -> p_location_id)
+DROP FUNCTION IF EXISTS validate_access(TEXT, UUID);
+DROP FUNCTION IF EXISTS validate_access(TEXT);
+
 CREATE OR REPLACE FUNCTION validate_access(
   p_matricula   TEXT,
   p_location_id UUID DEFAULT NULL
